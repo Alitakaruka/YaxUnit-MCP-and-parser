@@ -1,0 +1,10 @@
+module YaxUnitMCP
+
+go 1.26.5
+
+require (
+	github.com/PuerkitoBio/goquery v1.13.0 // indirect
+	github.com/andybalholm/cascadia v1.3.4 // indirect
+	github.com/qdrant/go-client v1.20.1 // indirect
+	golang.org/x/net v0.58.0 // indirect
+)
