@@ -11,16 +11,19 @@ import (
 )
 
 func main() {
-	startLogger("")
+	startLogger("logs.log")
 	go ParserWork()
 	time.Sleep(time.Hour)
 }
 
 func ParserWork() {
 	for {
+		counter := 0
 		YaxUnitParser.ParseAll(func(Data YaxUnitParser.PageData) {
+			counter++
 			fmt.Printf("Data: %v\n", Data)
 		})
+		log.Printf("Downloading %v pages is done!", counter)
 		<-time.After(time.Hour * 24)
 	}
 }

@@ -2,14 +2,17 @@ package YaxUnitParser
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
@@ -22,83 +25,105 @@ const (
 )
 
 type PageData struct {
+	URL    string
 	Header string
 	Data   string
 }
 
-func ParseAll(handeFunc func(Data PageData)) {
+func ParseAll(handleFunc func(Data PageData)) {
 	Parser := newMainParser()
 	go func() {
 		for data := range Parser.Pages {
-			handeFunc(data)
+			handleFunc(data)
 		}
 	}()
 	Parser.startParse()
-	Parser.Wait()
-	close(Parser.Pages)
+	Parser.Close()
 }
 
 type mainParser struct {
-	Pages chan PageData
-	WG    sync.WaitGroup
+	Pages   chan PageData
+	wg      sync.WaitGroup
+	client  *http.Client
+	visited map[string]struct{}
+	mu      sync.Mutex
 }
 
 func newMainParser() *mainParser {
-	MP := mainParser{}
-	MP.Pages = make(chan PageData, 10)
-	return &MP
+	mp := mainParser{}
+
+	mp.Pages = make(chan PageData, 10)
+
+	mp.client = &http.Client{}
+	mp.client.Timeout = time.Second * 5
+	mp.visited = make(map[string]struct{})
+	return &mp
 }
 
-func (P *mainParser) Wait() {
-	P.WG.Wait()
+func (P *mainParser) Close() {
+	P.wg.Wait()
+	close(P.Pages)
 }
 
 func (P *mainParser) startParse() {
-	P.WG.Add(2)
-	go P.processAll(DescriptionFirstPage)
-	go P.processAll(ApiFirsPage)
+	P.wg.Go(func() {
+		P.processAll(DescriptionFirstPage)
+	})
+	P.wg.Go(func() {
+		P.processAll(ApiFirsPage)
+	})
 }
 
-func (P *mainParser) processAll(PagePath string) {
+func (P *mainParser) processAll(pagePath string) {
 
-	PagePath = GetNormalPath(PagePath)
-	url := fmt.Sprintf(urlTemplate, PagePath)
+	pagePath = GetNormalPath(pagePath)
+	url := fmt.Sprintf(urlTemplate, pagePath)
 	page, err := P.getPage(url)
 	if err != nil {
 		log.Println(err)
 		return
 	}
-	Next, ParseData := P.parsePage(page)
-	if Next != "" {
-		P.WG.Go(func() {
-			P.processAll(Next)
+	next, parseData := P.parsePage(page)
+	if next != "" {
+		P.wg.Go(func() {
+			P.processAll(next)
 		})
 	}
 
-	if ParseData.Header == "" && ParseData.Data == "" {
+	if parseData.Header == "" && parseData.Data == "" {
 		log.Printf("Page:%s is empty!", url)
 		return
 	}
 
-	P.Pages <- ParseData
+	parseData.URL = url
+	P.Pages <- parseData
 }
 
-func GetNormalPath(PagePath string) string {
-	PagePath, _ = strings.CutSuffix(PagePath, "/")
-	Base := path.Base(PagePath)
-	Parts := path.Dir(PagePath)
+func GetNormalPath(pagePath string) string {
+	pagePath, _ = strings.CutSuffix(pagePath, "/")
+	base := path.Base(pagePath)
+	parts := path.Dir(pagePath)
 
-	return Parts + "/" + url.PathEscape(Base)
+	return parts + "/" + url.PathEscape(base)
 }
 
 func (P *mainParser) getPage(url string) ([]byte, error) {
-	fmt.Printf("url: %v\n", url)
-	resp, err := http.Get(url)
+
+	if P.markVisited(url) {
+		return []byte{}, nil
+	}
+
+	resp, err := P.client.Get(url)
 
 	if err != nil {
 		return []byte{}, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return []byte{}, errors.New("Error of geting page! Status:" + strconv.Itoa(resp.StatusCode))
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return []byte{}, err
@@ -107,20 +132,33 @@ func (P *mainParser) getPage(url string) ([]byte, error) {
 	return body, nil
 }
 
+func (P *mainParser) markVisited(url string) bool {
+	P.mu.Lock()
+	defer P.mu.Unlock()
+
+	if _, exists := P.visited[url]; exists {
+		return true
+	}
+
+	P.visited[url] = struct{}{}
+	return false
+}
+
 func (P *mainParser) parsePage(html []byte) (string, PageData) {
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(html))
 	if err != nil {
 		log.Println(err)
+		return "", PageData{}
 	}
 
-	NextUrl, _ := doc.Find(".pagination-nav__link.pagination-nav__link--next").Attr("href")
+	nextUrl, _ := doc.Find(".pagination-nav__link.pagination-nav__link--next").Attr("href")
 
 	pageText := doc.Find(".theme-doc-markdown").Text()
-	Header := ""
+	header := ""
 	doc.Find("header").Each(func(i int, s *goquery.Selection) {
-		Header = s.Find("h1").Text()
+		header = s.Find("h1").Text()
 	})
 
-	Result := PageData{Header: Header, Data: pageText}
-	return NextUrl, Result
+	Result := PageData{Header: header, Data: pageText}
+	return nextUrl, Result
 }
