@@ -3,10 +3,8 @@ package mcpserver
 import (
 	"context"
 	"fmt"
-	// MCP-02 BEGIN: Bound read-only requests and normalize optional inputs.
 	"strings"
 	"time"
-	// MCP-02 END.
 
 	database "YaxUnitMCP/src/DB"
 
@@ -65,7 +63,6 @@ func (s *Server) registerTools() {
 		},
 		s.getDocumentation,
 	)
-	// MCP-02 BEGIN: Add read-only tools without changing the existing tools.
 	closedWorld := false
 	mcp.AddTool(s.server, &mcp.Tool{
 		Name:        "get_database_status",
@@ -84,7 +81,6 @@ func (s *Server) registerTools() {
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &closedWorld},
 		}, s.getDocument)
 	}
-	// MCP-02 END: Search and retrieval are advertised only if the database supports them.
 }
 
 type SearchInput struct {
@@ -110,7 +106,6 @@ func (s *Server) getDocumentation(
 	return nil, Output{Greeting: string(result.Hits)}, nil
 }
 
-// MCP-02 BEGIN: Typed outputs avoid JSON embedded in a greeting string.
 type StatusInput struct{}
 
 type StatusOutput struct {
@@ -194,7 +189,6 @@ func (s *Server) getDocument(ctx context.Context, req *mcp.CallToolRequest, inpu
 		Content: string(content), Truncated: truncated,
 	}, nil
 }
-// MCP-02 END: Every new handler uses a timeout and performs no writes.
 
 func (s *Server) Run(ctx context.Context) error {
 	return s.server.Run(
