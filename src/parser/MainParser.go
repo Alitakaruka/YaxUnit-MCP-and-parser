@@ -8,7 +8,9 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"path"
+	// FIX-07 BEGIN: URL parsing replaces manual path reconstruction.
+	// "path"
+	// FIX-07 END.
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +33,8 @@ type PageData struct {
 }
 
 func ParseAll(handleFunc func(Data PageData)) {
+	// FIX-01 BEGIN: Wait for every callback, not just the page downloaders.
+	/* Original implementation:
 	Parser := newMainParser()
 	go func() {
 		for data := range Parser.Pages {
@@ -39,6 +43,16 @@ func ParseAll(handleFunc func(Data PageData)) {
 	}()
 	Parser.startParse()
 	Parser.Close()
+	*/
+	Parser := newMainParser()
+	go func() {
+		Parser.startParse()
+		Parser.Close()
+	}()
+	for data := range Parser.Pages {
+		handleFunc(data)
+	}
+	// FIX-01 END: Returning now guarantees that indexing callbacks have finished.
 }
 
 type mainParser struct {
@@ -100,11 +114,22 @@ func (P *mainParser) processAll(pagePath string) {
 }
 
 func GetNormalPath(pagePath string) string {
+	// FIX-07 BEGIN: Do not encode '%' again in already escaped pagination links.
+	/* Original normalization:
 	pagePath, _ = strings.CutSuffix(pagePath, "/")
 	base := path.Base(pagePath)
 	parts := path.Dir(pagePath)
 
 	return parts + "/" + url.PathEscape(base)
+	*/
+	parsed, err := url.Parse(pagePath)
+	if err != nil {
+		return pagePath
+	}
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	parsed.RawPath = strings.TrimSuffix(parsed.RawPath, "/")
+	return parsed.EscapedPath()
+	// FIX-07 END: Preserve escaped segments and discard query/fragment components.
 }
 
 func (P *mainParser) getPage(url string) ([]byte, error) {

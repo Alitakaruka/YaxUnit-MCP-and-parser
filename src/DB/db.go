@@ -71,12 +71,24 @@ func NewElasticDataBase(url string) (*elasticDataBase, error) {
 		return nil, err
 	}
 
+	// FIX-06 BEGIN: Close the response and reject unexpected HTTP errors.
+	/* Original existence check:
 	if exists.StatusCode == 404 {
 		err = CreateIndex(es)
 		if err != nil {
 			return nil, err
 		}
 	}
+	*/
+	defer exists.Body.Close()
+	if exists.StatusCode == 404 {
+		if err := CreateIndex(es); err != nil {
+			return nil, err
+		}
+	} else if exists.IsError() {
+		return nil, fmt.Errorf("elasticsearch index existence error: status=%s", exists.Status())
+	}
+	// FIX-06 END.
 
 	db.es = es
 
@@ -92,6 +104,9 @@ func CreateIndex(es *elasticsearch.Client) error {
 		return err
 	}
 
+	// FIX-06 BEGIN: Release the create-index response on both success and failure.
+	defer resp.Body.Close()
+	// FIX-06 END.
 	if resp.IsError() {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf(
@@ -138,15 +153,30 @@ func (E *elasticDataBase) IndexDocument(ctx context.Context, doc Document) error
 	if len(doc.Content) == 0 {
 		return errors.New("document is empty")
 	}
+	// FIX-04 BEGIN: Missing IDs would silently create duplicates on every import.
+	if doc.ID == "" {
+		return errors.New("document ID is empty")
+	}
+	// FIX-04 END.
 	body, err := json.Marshal(doc)
 	if err != nil {
 		return err
 	}
+	// FIX-04 BEGIN: Use Document.ID as _id, not just a field in the JSON payload.
+	/* Original indexing request:
 	indexRes, err := E.es.Index(
 		"documents",
 		bytes.NewReader(body),
 		E.es.Index.WithContext(ctx),
 	)
+	*/
+	indexRes, err := E.es.Index(
+		"documents",
+		bytes.NewReader(body),
+		E.es.Index.WithContext(ctx),
+		E.es.Index.WithDocumentID(doc.ID),
+	)
+	// FIX-04 END: Reindexing a URL overwrites its document instead of adding one.
 	if err != nil {
 		return err
 	}
@@ -167,6 +197,9 @@ func (E *elasticDataBase) IndexDocument(ctx context.Context, doc Document) error
 func (E *elasticDataBase) SearchDocuments(ctx context.Context, searchText string) (SearchResult, error) {
 
 	query, err := json.Marshal(map[string]interface{}{
+		// FIX-05 BEGIN: Request an exact count, including indexes with over 10,000 hits.
+		"track_total_hits": true,
+		// FIX-05 END.
 		"query": map[string]interface{}{
 			"multi_match": map[string]interface{}{
 				"query": searchText,
@@ -206,6 +239,8 @@ func (E *elasticDataBase) SearchDocuments(ctx context.Context, searchText string
 		return SearchResult{}, err
 	}
 
+	// FIX-05 BEGIN: Elasticsearch returns the count at hits.total.value.
+	/* Original response decoding:
 	result := SearchResult{}
 	err = json.Unmarshal(body, &result)
 	if err != nil {
@@ -213,4 +248,21 @@ func (E *elasticDataBase) SearchDocuments(ctx context.Context, searchText string
 	}
 
 	return result, err
+	*/
+	var response struct {
+		Hits json.RawMessage `json:"hits"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return SearchResult{}, err
+	}
+	var hits struct {
+		Total struct {
+			Value int64 `json:"value"`
+		} `json:"total"`
+	}
+	if err := json.Unmarshal(response.Hits, &hits); err != nil {
+		return SearchResult{}, err
+	}
+	return SearchResult{Total: hits.Total.Value, Hits: response.Hits}, nil
+	// FIX-05 END: Preserve the existing Hits payload for MCP clients.
 }
