@@ -1,14 +1,45 @@
-package mcp
+package mcpserver
 
 import (
 	"context"
-	"log"
+	"fmt"
+
+	database "YaxUnitMCP/src/DB"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func CreateMCP() {
-	server := mcp.NewServer(
+type Server struct {
+	server *mcp.Server
+	db     database.SearchDataBase
+}
+
+type Input struct {
+	Name string `json:"name" jsonschema:"the name of the person to greet"`
+}
+
+type Output struct {
+	Greeting string `json:"greeting" jsonschema:"the greeting to tell to the user"`
+}
+
+func SayHi(ctx context.Context, req *mcp.CallToolRequest, input Input) (
+	*mcp.CallToolResult,
+	Output,
+	error,
+) {
+	return nil, Output{Greeting: "Hi " + input.Name}, nil
+}
+
+func New(db database.SearchDataBase) (*Server, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+
+	s := &Server{
+		db: db,
+	}
+
+	s.server = mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "YaxBase",
 			Version: "1.0.0",
@@ -16,40 +47,54 @@ func CreateMCP() {
 		nil,
 	)
 
-	// Регистрируем инструменты
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "get_product",
-		Description: "Получить информацию о товаре по ID",
-	}, func(
-		ctx context.Context,
-		req *mcp.CallToolRequest,
-		input struct{},
-	) (*mcp.CallToolResult, map[string]int, error) {
-		return nil, map[string]int{
-			"total": 125,
-		}, nil
-	})
+	s.registerTools()
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "get_stock",
-		Description: "Получить общее количество товаров на складе",
-	}, func(
-		ctx context.Context,
-		req *mcp.CallToolRequest,
-		input struct{},
-	) (*mcp.CallToolResult, map[string]int, error) {
-		return nil, map[string]int{
-			"total": 125,
-		}, nil
-	})
+	return s, nil
+}
 
-	log.Println("MCP Server started")
+func (s *Server) registerTools() {
+	mcp.AddTool(
+		s.server,
+		&mcp.Tool{
+			Name:        "get_documentation",
+			Description: "Получить информацию из технической документации",
+		},
+		s.getDocumentation,
+	)
+	mcp.AddTool(
+		s.server,
+		&mcp.Tool{
+			Name:        "Скажи привет!",
+			Description: "просто отправляет привет",
+		}, SayHi)
+}
 
-	if err := server.Run(
-		context.Background(),
-		&mcp.StdioTransport{},
-	); err != nil {
-		log.Fatal(err)
+type SearchInput struct {
+	Query string `json:"query" jsonschema:"Поисковый запрос"`
+}
+
+func (s *Server) getDocumentation(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+	input SearchInput,
+) (*mcp.CallToolResult, Output, error) {
+	if input.Query == "" {
+		return nil, Output{}, fmt.Errorf("query is empty")
 	}
 
+	result, err := s.db.SearchDocuments(ctx, input.Query)
+	if err != nil {
+		return nil, Output{}, fmt.Errorf(
+			"documentation search failed: %w", err,
+		)
+	}
+
+	return nil, Output{Greeting: string(result.Hits)}, nil
+}
+
+func (s *Server) Run(ctx context.Context) error {
+	return s.server.Run(
+		ctx,
+		&mcp.StdioTransport{},
+	)
 }

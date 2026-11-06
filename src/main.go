@@ -1,31 +1,76 @@
 package main
 
 import (
+	DataBase "YaxUnitMCP/src/DB"
+	mcpserver "YaxUnitMCP/src/MCP"
 	YaxUnitParser "YaxUnitMCP/src/parser"
-	"fmt"
+	"context"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
 func main() {
-	startLogger("logs.log")
-	go ParserWork()
-	time.Sleep(time.Hour)
+	err := startLogger("logs.log")
+	if err != nil {
+		log.Fatal(err)
+	}
+	url := os.Getenv("ELASTICSEARCH_URL")
+	if url == "" {
+		url = "http://localhost:9200"
+	}
+	db, err := DataBase.NewElasticDataBase(url)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println("Data base init sucses!")
+	count, err := db.CountDocuments(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if count == 0 {
+		go ParserWork(db)
+	}
+
+	// db.SearchDocuments(context.Background(), []byte("Как устроена система"))
+	mcpServer, err := mcpserver.New(db)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println("Server started!")
+	err = mcpServer.Run(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
-func ParserWork() {
-	for {
-		counter := 0
-		YaxUnitParser.ParseAll(func(Data YaxUnitParser.PageData) {
-			counter++
-			fmt.Printf("Data: %v\n", Data)
-		})
-		log.Printf("Downloading %v pages is done!", counter)
-		<-time.After(time.Hour * 24)
-	}
+func ParserWork(db DataBase.SearchDataBase) {
+
+	counter := 0
+	YaxUnitParser.ParseAll(func(data YaxUnitParser.PageData) {
+		doc := DataBase.Document{
+			ID:        strconv.Itoa(counter),
+			Title:     data.Header,
+			Content:   data.Data,
+			Category:  "Documentation",
+			Source:    data.URL,
+			CreatedAt: time.Now(),
+			Tags:      []string{"YaxUnit"},
+		}
+		err := db.IndexDocument(context.Background(), doc)
+		if err != nil {
+			log.Println(err)
+		}
+		counter++
+	})
+	log.Printf("Downloading %v pages is done!", counter)
+	<-time.After(time.Hour * 24)
 }
 
 func startLogger(filePath string) error {
