@@ -1,16 +1,4 @@
 services:
-  app:
-    build:
-      context: .
-    environment:
-      ELASTICSEARCH_URL: http://elasticsearch:9200
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
-    stdin_open: true
-    tty: false
-    restart: unless-stopped
-
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:9.5.2
     environment:
@@ -18,17 +6,32 @@ services:
       xpack.security.enabled: "false"
       ES_JAVA_OPTS: "-Xms512m -Xmx512m"
     ports:
-      - "127.0.0.1:9200:9200"
+      - "127.0.0.1:9221:9200"
     volumes:
       - elasticsearch-data:/usr/share/elasticsearch/data
     healthcheck:
       test:
         - CMD-SHELL
-        - 'curl -fsS "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s" || exit 1'
+        - 'curl -fsS "http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=5s" >/dev/null || exit 1'
       interval: 10s
       timeout: 10s
       retries: 30
       start_period: 30s
+    restart: unless-stopped
+
+  mcp-server:
+    image: yaxbase:arm64
+    platform: linux/arm64
+    ports:
+    - "8003:8000"
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      MAINPORT : 8000
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    stdin_open: true
+    tty: false
     restart: unless-stopped
 
 volumes:

@@ -1,6 +1,7 @@
 package YaxUnitParser
 
 import (
+	"YaxUnitMCP/service"
 	"bytes"
 	"errors"
 	"fmt"
@@ -8,9 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	// FIX-07 BEGIN: URL parsing replaces manual path reconstruction.
-	// "path"
-	// FIX-07 END.
+
 	"strconv"
 	"strings"
 	"sync"
@@ -26,24 +25,7 @@ const (
 	ApiFirsPage          = "/yaxunit/api/Мокито"
 )
 
-type PageData struct {
-	URL    string
-	Header string
-	Data   string
-}
-
-func ParseAll(handleFunc func(Data PageData)) {
-	// FIX-01 BEGIN: Wait for every callback, not just the page downloaders.
-	/* Original implementation:
-	Parser := newMainParser()
-	go func() {
-		for data := range Parser.Pages {
-			handleFunc(data)
-		}
-	}()
-	Parser.startParse()
-	Parser.Close()
-	*/
+func ParseAll(handleFunc func(Data service.PageData)) {
 	Parser := newMainParser()
 	go func() {
 		Parser.startParse()
@@ -52,11 +34,10 @@ func ParseAll(handleFunc func(Data PageData)) {
 	for data := range Parser.Pages {
 		handleFunc(data)
 	}
-	// FIX-01 END: Returning now guarantees that indexing callbacks have finished.
 }
 
 type mainParser struct {
-	Pages   chan PageData
+	Pages   chan service.PageData
 	wg      sync.WaitGroup
 	client  *http.Client
 	visited map[string]struct{}
@@ -66,7 +47,7 @@ type mainParser struct {
 func newMainParser() *mainParser {
 	mp := mainParser{}
 
-	mp.Pages = make(chan PageData, 10)
+	mp.Pages = make(chan service.PageData, 10)
 
 	mp.client = &http.Client{}
 	mp.client.Timeout = time.Second * 5
@@ -114,14 +95,7 @@ func (P *mainParser) processAll(pagePath string) {
 }
 
 func GetNormalPath(pagePath string) string {
-	// FIX-07 BEGIN: Do not encode '%' again in already escaped pagination links.
-	/* Original normalization:
-	pagePath, _ = strings.CutSuffix(pagePath, "/")
-	base := path.Base(pagePath)
-	parts := path.Dir(pagePath)
 
-	return parts + "/" + url.PathEscape(base)
-	*/
 	parsed, err := url.Parse(pagePath)
 	if err != nil {
 		return pagePath
@@ -129,7 +103,6 @@ func GetNormalPath(pagePath string) string {
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
 	parsed.RawPath = strings.TrimSuffix(parsed.RawPath, "/")
 	return parsed.EscapedPath()
-	// FIX-07 END: Preserve escaped segments and discard query/fragment components.
 }
 
 func (P *mainParser) getPage(url string) ([]byte, error) {
@@ -169,14 +142,23 @@ func (P *mainParser) markVisited(url string) bool {
 	return false
 }
 
-func (P *mainParser) parsePage(html []byte) (string, PageData) {
+func (P *mainParser) parsePage(html []byte) (string, service.PageData) {
+
+	Result := service.PageData{}
+
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(html))
 	if err != nil {
 		log.Println(err)
-		return "", PageData{}
+		return "", service.PageData{}
 	}
 
 	nextUrl, _ := doc.Find(".pagination-nav__link.pagination-nav__link--next").Attr("href")
+
+	module, err := parseHTML(html)
+
+	if err == nil {
+		Result.Module = *module
+	}
 
 	pageText := doc.Find(".theme-doc-markdown").Text()
 	header := ""
@@ -184,6 +166,153 @@ func (P *mainParser) parsePage(html []byte) (string, PageData) {
 		header = s.Find("h1").Text()
 	})
 
-	Result := PageData{Header: header, Data: pageText}
+	Result.Data = pageText
+	Result.Header = header
+	Result.URL = ""
 	return nextUrl, Result
+}
+
+func cleanText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func parseHTML(html []byte) (*service.Module, error) {
+	doc, err := goquery.NewDocumentFromReader(
+		(bytes.NewReader(html)),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	module := &service.Module{
+		Name: cleanText(doc.Find("h1").First().Text()),
+	}
+
+	doc.Find("article h3").Each(func(_ int, heading *goquery.Selection) {
+		method := service.Method{
+			Name: strings.TrimSpace(heading.Find("code").Text()),
+		}
+
+		if method.Name == "" {
+			return
+		}
+
+		var section []*goquery.Selection
+
+		for node := heading.Next(); node.Length() > 0; node = node.Next() {
+			if node.Is("h3") {
+				break
+			}
+			section = append(section, node)
+		}
+
+		var description []string
+
+		for _, node := range section {
+			if node.Is("p") && node.Find("strong").Length() != 1 {
+				text := cleanText(node.Text())
+				if text != "" {
+					description = append(description, text)
+				}
+			}
+
+			if node.Find("strong").FilterFunction(func(_ int, s *goquery.Selection) bool {
+				return cleanText(s.Text()) == "Параметры метода"
+			}).Length() > 0 {
+				method.Parameters = parseParameters(node.Next())
+			}
+
+			if node.Find("strong").FilterFunction(func(_ int, s *goquery.Selection) bool {
+				return cleanText(s.Text()) == "Возвращает"
+			}).Length() > 0 {
+				method.Returns = parseReturn(node)
+			}
+
+			// Извлекаем примеры кода.
+			node.Find("pre code").Each(func(_ int, code *goquery.Selection) {
+				example := strings.TrimSpace(code.Text())
+				if example != "" {
+					method.Examples = append(method.Examples, example)
+				}
+			})
+		}
+
+		method.Description = strings.Join(description, " ")
+
+		module.Methods = append(module.Methods, method)
+	})
+
+	// js, _ := json.Marshal(module)
+	// fmt.Printf("js: %v\n", string(js))
+	return module, nil
+}
+
+func parseParameters(section *goquery.Selection) []service.Parameter {
+	var result []service.Parameter
+
+	section.ChildrenFiltered("li").Each(func(_ int, li *goquery.Selection) {
+
+		param := service.Parameter{
+			Name: cleanText(li.ChildrenFiltered("code").First().Text()),
+		}
+
+		if param.Name == "" {
+			return
+		}
+
+		firstNested := li.ChildrenFiltered("ul").First()
+
+		firstNested.ChildrenFiltered("li").Each(func(_ int, item *goquery.Selection) {
+			code := item.ChildrenFiltered("code")
+
+			if code.Length() > 0 {
+				param.Type = cleanText(code.First().Text())
+			}
+
+			MoreInformation := item.ChildrenFiltered("ul")
+
+			text := cleanText(MoreInformation.Clone().Remove().End().Text())
+
+			if text != "" {
+				param.Description = strings.TrimSpace(
+					strings.TrimPrefix(text, param.Type+" -"),
+				)
+			}
+
+			MoreInformation.ChildrenFiltered("li").Each(func(_ int, child *goquery.Selection) {
+				param.Values = append(param.Values, service.Parameter{
+					Name: cleanText(child.Find("code").First().Text()),
+					Description: cleanText(
+						getContentText(child),
+					),
+				})
+			})
+		})
+
+		result = append(result, param)
+	})
+
+	return result
+}
+
+func getContentText(child *goquery.Selection) string {
+	var result string
+	child.Contents().Each(func(i int, s *goquery.Selection) {
+		if goquery.NodeName(s) == "#text" {
+			result += s.Text()
+		}
+	})
+	return cleanText(result)
+}
+func parseReturn(section *goquery.Selection) *service.Return {
+	p := section.Find("p").First()
+
+	if p.Length() == 0 {
+		return nil
+	}
+
+	return &service.Return{
+		Type:        cleanText(p.Find("code").First().Text()),
+		Description: cleanText(p.Clone().Find("code").Remove().End().Text()),
+	}
 }
